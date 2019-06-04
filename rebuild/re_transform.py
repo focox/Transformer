@@ -30,8 +30,8 @@ def attention(query, key, value, mask=None, dropout=None):
     # 与其它词的key向量进行点积计算相似度。
     scores = torch.bmm(query, key.transpose(dim0=1, dim1=2)) / math.sqrt(d_k)
     if mask is not None:
-        # Todo: 需要进行分析
-        scores = scores.masked_fill(mask==0, -np.inf)
+        # Todo: 需要进行分析, 补零的地方再点积之后中，值仍然为零。因此在这里将值为零的地方代替为-np.inf，从而起到mask的作用。
+        scores = scores.masked_fill(mask==0, value=-np.inf)
     # 因此softmax要沿着torch.bmm之后结果的最后一维进行，即沿矩阵A的列进行softmax, 即对矩阵A的每一行进行softmax
     # 总的来看就是可以得到每个样本中，每句话的每一个词的query与同句话中其它词key的相似度概率分布。
     scores = F.softmax(scores, dim=-1)
@@ -41,6 +41,15 @@ def attention(query, key, value, mask=None, dropout=None):
     if dropout is not None:
         output = dropout(output)
     return output, scores
+
+
+def sequence_mask(max_seq_len, ):
+
+    pass
+
+
+def sequence_padding(input, input_len):
+    pass
 
 
 class MultiHeadAttention(nn.Module):
@@ -203,28 +212,52 @@ class Decoder(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, dim_model, max_seq_length):
+    def __init__(self, dim_model, max_seq_len=50000):
+        # 长度过长的句子，已经在数据集上去除了。
+        # 这里max_seq_len=50000是为了生成一个参考位置编码，这样以后就只需要从这个位置编码中截取所需即可。
         super(PositionalEncoding, self).__init__()
-        pe = [[pos / np.power(10000, 2*i/dim_model) for i in range(dim_model)] for pos in range(max_seq_length)]
+        self.dim_model = dim_model
+        self.max_seq_len = max_seq_len
+        pe = [[pos / np.power(10000, 2*i/dim_model) for i in range(dim_model)] for pos in range(max_seq_len)]
         pe = np.array(pe)
         # 偶数位置上为sin, 奇数位置上为cos
         pe[:, 0::2] = np.sin(pe[:, 0::2])
         pe[:, 1::2] = np.cos(pe[:, 1::2])
-        self.position = torch.tensor(pe).unsqueeze(dim=0)
+        # 这里的pe为单独一个样本的位置编码，因此后续需要根据输入的batch将其调整为batch
+        self.position_encoding = pe
 
-    def forward(self, x):
+    def forward(self, x, x_len):
         """
-        add positional encoding to x. Here x is batch_size data.
-        :param x: shape=[batch_size, num_word, dim_model]
+        compute positional encoding. x_len 为 batch_size 数据，形状为：[batch_size, 1], 行为样本，列为样本长度。
+        :param x: batch_size data
+        :param x_len: shape=[batch_size, 1]
         :return:
         """
-        return x + self.position.expand(x.shape)
+        # 计算出当前batch下最长的序列长度。
+        max_seq_len = max(x_len)
+        self.position_encoding = self.position_encoding[:max_seq_len]
+        batch_size = x_len.size(0)
+        self.position_encoding = self.position_encoding.expand([batch_size, max_seq_len, self.dim_model])
+        for row_idx, seq_len in enumerate(x_len):
+            # 将序列中补零位置的位置编码设置成0
+            self.position_encoding[row_idx, seq_len:] = 0
+        return x + self.position_encoding
 
 
 class Embidding(nn.Module):
     def __init__(self, vocab_size, dim_model):
         super(Embidding, self).__init__()
-        self.embidding = nn.Embedding(vocab_size, dim_model)
+        self.embedding = nn.Embedding(vocab_size, dim_model)
+
+    def forward(self, x):
+        """
+        将batch_size数据转换成 dim_ model
+        :param x: batch_size input, [[idx11, idx12, ...], [idx21, idx22, ...], ...]
+        :return:
+        """
+        return self.embedding(x)
+
+
 
 
 
