@@ -43,14 +43,29 @@ def attention(query, key, value, mask=None, dropout=None):
     return output, scores
 
 
-def sequence_mask(max_seq_len, ):
+def sequence_padding_mask(input_len):
+    """
+    解码器中在softmax中对补零的位置进行乘-inf，其它位置乘1。（softmax之后的值为正小数）
+    :param input_len: shape = [batch_size, 1], 可以理解为是一个行向量或列向量。
+    :return:
+    """
+    max_len = max(input_len)
+    mask = [[[1]*int(i) + [-np.inf] * int(max_len-i)] * int(max_len) for i in input_len]
+    mask = torch.tensor(mask)
+    return mask
 
-    pass
 
-
-def sequence_padding(input, input_len):
-    pass
-
+def decoder_sequence_mask(src_input):
+    """
+    解码器中解决左侧会依赖右侧的情况，因些这里要设计一个下三角矩阵（准确讲应该是方阵）与softmax前的矩阵进行对应点相乘。
+    :param scr_input:
+    :return:
+    """
+    batch_size = src_input.size(0)
+    max_len = int(src_input.size(1))
+    mask = [[1] * i + [-np.inf] * (max_len - i) for i in range(1, max_len+1)]
+    mask = torch.tensor(mask)
+    mask = mask.unsqueeze(dim=0).expand([batch_size, max_len, max_len])
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, h, dim_model, dropout=0.1):
@@ -244,9 +259,9 @@ class PositionalEncoding(nn.Module):
         return x + self.position_encoding
 
 
-class Embidding(nn.Module):
+class Embedding(nn.Module):
     def __init__(self, vocab_size, dim_model):
-        super(Embidding, self).__init__()
+        super(Embedding, self).__init__()
         self.embedding = nn.Embedding(vocab_size, dim_model)
 
     def forward(self, x):
@@ -256,6 +271,32 @@ class Embidding(nn.Module):
         :return:
         """
         return self.embedding(x)
+
+
+class EncoderDecoder(nn.Module):
+    def __init__(self, vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder):
+        super(EncoderDecoder, self).__init__()
+        self.encoder = Encoder(h, dim_model, dim_ff, num_sub_encoder)
+        self.decoder = Decoder(h, dim_model, dim_ff, num_sub_decoder)
+        self.positional_encoding = PositionalEncoding(dim_model)
+        self.embedding = Embedding(vocab_size, dim_model)
+
+    def forward(self, src, src_size, tgt, tgt_size):
+        # 这里的src, 认为已经通过了padding
+        x = self.embedding(src)
+        x = self.positional_encoding(x)
+        encoder_output = self.encoder(x)
+        y = self.embedding(tgt)
+        y = self.positional_encoding(y)
+        y = self.decoder(y, encoder_output, mask=None)
+        output = torch.bmm(y, torch.transpose(self.embedding.weight, dim0=1, dim1=2))
+        return output
+
+
+
+
+
+
 
 
 
