@@ -67,6 +67,7 @@ def decoder_sequence_mask(src_input):
     mask = torch.tensor(mask)
     mask = mask.unsqueeze(dim=0).expand([batch_size, max_len, max_len])
 
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, h, dim_model, dropout=0.1):
         """
@@ -152,7 +153,7 @@ class SubEncoder(nn.Module):
         :return:
         """
         # *********sub-layer1************
-        multi_head_attention_output = self.multi_head_attention(x, x, x)
+        multi_head_attention_output = self.multi_head_attention(x, x, x, )
         # residual connection
         residual_layer = multi_head_attention_output + x
         layer_norm_output = self.layer_norm[0](residual_layer)
@@ -274,24 +275,33 @@ class Embedding(nn.Module):
 
 
 class EncoderDecoder(nn.Module):
-    def __init__(self, vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder):
+    def __init__(self, src_vocab_size, tgt_vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder):
         super(EncoderDecoder, self).__init__()
         self.encoder = Encoder(h, dim_model, dim_ff, num_sub_encoder)
         self.decoder = Decoder(h, dim_model, dim_ff, num_sub_decoder)
         self.positional_encoding = PositionalEncoding(dim_model)
-        self.embedding = Embedding(vocab_size, dim_model)
+        self.src_embedding = Embedding(src_vocab_size, dim_model)
+        self.tgt_embedding = Embedding(tgt_vocab_size, dim_model)
 
     def forward(self, src, src_size, tgt, tgt_size):
         # 这里的src, 认为已经通过了padding
-        x = self.embedding(src)
+        # Todo: 暂时不考虑mask
+        x = self.src_embedding(src)
         x = self.positional_encoding(x)
         encoder_output = self.encoder(x)
-        y = self.embedding(tgt)
+        y = self.tgt_embedding(tgt)
         y = self.positional_encoding(y)
         y = self.decoder(y, encoder_output, mask=None)
-        output = torch.bmm(y, torch.transpose(self.embedding.weight, dim0=1, dim1=2))
+        output = torch.bmm(y, torch.transpose(self.tgt_embedding.weight))
         return output
 
+    # def backward(self, src, src_size, tgt, tgt_size):
+
+
+# def make_model(vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder):
+#     model = EncoderDecoder(vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder)
+
+# model = EncoderDecoder(src_vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder)
 
 
 
