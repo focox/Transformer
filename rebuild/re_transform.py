@@ -209,7 +209,7 @@ class Encoder(nn.Module):
     def __init__(self, h, dim_model, dim_ff, num_sub_encoder):
         super(Encoder, self).__init__()
         # 论文第3页中，编码器中有6个子层
-        self.encoder = nn.Sequential([SubEncoder(h, dim_model, dim_ff) for _ in range(num_sub_encoder)])
+        self.encoder = nn.Sequential(*[SubEncoder(h, dim_model, dim_ff) for _ in range(num_sub_encoder)])
 
     def forward(self, x):
         return self.encoder(x)
@@ -304,10 +304,17 @@ class EncoderDecoder(nn.Module):
 # model = EncoderDecoder(src_vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder)
 
 
+model = EncoderDecoder(
+    src_vocab_size=10000,
+    tgt_vocab_size=20000,
+    h=8,
+    dim_model=512,
+    dim_ff=2048,
+    num_sub_decoder=6,
+    num_sub_encoder=6
+)
 
-
-
-
+print(model)
 
 
 
