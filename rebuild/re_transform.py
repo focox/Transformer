@@ -17,7 +17,7 @@ def attention(query, key, value, mask=None, dropout=None):
     第二维是句子中词的个数，第三维是词向量的维度。
     :param key: shape=[batch_size, num_word, word_vec]
     :param value: shape=[batch_size, num_word, word_vec]
-    :param mask:
+    :param mask: 这里的mask可根据embedding前的batch_size input得到，不为0的地方置为1,为0的置为-inf
     :return:
     """
     # 获取query中最后一个维度，即词向量的维度，来源于论文第3页倒数第三段最后一行。
@@ -30,42 +30,21 @@ def attention(query, key, value, mask=None, dropout=None):
     # 与其它词的key向量进行点积计算相似度。
     scores = torch.bmm(query, key.transpose(dim0=1, dim1=2)) / math.sqrt(d_k)
     if mask is not None:
-        # Todo: 需要进行分析, 补零的地方再点积之后中，值仍然为零。因此在这里将值为零的地方代替为-np.inf，从而起到mask的作用。
+        # 可将mask设置为原始batch_size的输入值
+        mask = mask.unsqueeze(dim=-1)
         scores = scores.masked_fill(mask==0, value=-np.inf)
+        scores.masked_fill_(scores.transpose(dim0=-2, dim1=-1)==-np.inf, -np.inf)
     # 因此softmax要沿着torch.bmm之后结果的最后一维进行，即沿矩阵A的列进行softmax, 即对矩阵A的每一行进行softmax
     # 总的来看就是可以得到每个样本中，每句话的每一个词的query与同句话中其它词key的相似度概率分布。
     scores = F.softmax(scores, dim=-1)
+    if mask is not None:
+        scores.masked_fill_(mask==0, 0)
     # output的维度为[batch_size, num_word, value最后一维的维度]
     # 同样取一个样本的后两维构成的矩阵B进行分析：第i行为第i个词要计算的value加权和。
     output = torch.bmm(scores, value)
     if dropout is not None:
         output = dropout(output)
     return output, scores
-
-
-def sequence_padding_mask(input_len):
-    """
-    解码器中在softmax中对补零的位置进行乘-inf，其它位置乘1。（softmax之后的值为正小数）
-    :param input_len: shape = [batch_size, 1], 可以理解为是一个行向量或列向量。
-    :return:
-    """
-    max_len = max(input_len)
-    mask = [[[1]*int(i) + [-np.inf] * int(max_len-i)] * int(max_len) for i in input_len]
-    mask = torch.tensor(mask)
-    return mask
-
-
-def decoder_sequence_mask(src_input):
-    """
-    解码器中解决左侧会依赖右侧的情况，因些这里要设计一个下三角矩阵（准确讲应该是方阵）与softmax前的矩阵进行对应点相乘。
-    :param scr_input:
-    :return:
-    """
-    batch_size = src_input.size(0)
-    max_len = int(src_input.size(1))
-    mask = [[1] * i + [-np.inf] * (max_len - i) for i in range(1, max_len+1)]
-    mask = torch.tensor(mask)
-    mask = mask.unsqueeze(dim=0).expand([batch_size, max_len, max_len])
 
 
 class MultiHeadAttention(nn.Module):
@@ -82,15 +61,14 @@ class MultiHeadAttention(nn.Module):
         self.dim_model = dim_model
         # 这里取query, key, value的维度相同。
         # 利用nn.ModuleList创建h个线性映射，nn.ModuleList中各Module之间没有联系，而nn.Sequential中前一个Module的输出是后一个Module的输入
-        self.linear_query = nn.ModuleList([nn.Linear(dim_model, d_k) for _ in range(h)])
-        self.linear_key = nn.ModuleList([nn.Linear(dim_model, d_k) for _ in range(h)])
-        self.linear_value = nn.ModuleList([nn.Linear(dim_model, d_k) for _ in range(h)])
+        self.linear_query = nn.ModuleList([copy.deepcopy(nn.Linear(dim_model, d_k)) for _ in range(h)])
+        self.linear_key = nn.ModuleList([copy.deepcopy(nn.Linear(dim_model, d_k)) for _ in range(h)])
+        self.linear_value = nn.ModuleList([copy.deepcopy(nn.Linear(dim_model, d_k)) for _ in range(h)])
         # 最后一层的输入维度应该是 h*d_k=dim_model
         self.linear_last = nn.Linear(h*d_k, dim_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key, value, mask=None):
-        # Todo: mask还没有加，暂时没有想明白
         query_list, key_list, value_list = [], [], []
         # 将query, key, value分别进行h次线性映射，并将结果进行分别保存。
         for linear in self.linear_query:
@@ -143,17 +121,17 @@ class SubEncoder(nn.Module):
         self.multi_head_attention = MultiHeadAttention(h, dim_model)
         # Normalize over last dimension of size dim_model
         # 这里要实例化两个LayerNorm，不然应该会出现参数共享的情况。
-        self.layer_norm = [nn.LayerNorm(dim_model) for _ in range(2)]
+        self.layer_norm = nn.ModuleList([copy.deepcopy(nn.LayerNorm(dim_model)) for _ in range(2)])
         self.ffn = PositionWiseFeedForward(dim_model, dim_ff)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         """
         sub-encoder, the complete encoder block.
         :param x: batch输入数据
         :return:
         """
         # *********sub-layer1************
-        multi_head_attention_output = self.multi_head_attention(x, x, x, )
+        multi_head_attention_output = self.multi_head_attention(x, x, x, mask=mask)
         # residual connection
         residual_layer = multi_head_attention_output + x
         layer_norm_output = self.layer_norm[0](residual_layer)
@@ -162,16 +140,16 @@ class SubEncoder(nn.Module):
         # residual connection
         residual_layer = ffn_output + layer_norm_output
         layer_norm_output = self.layer_norm[1](residual_layer)
-        return layer_norm_output
+        return layer_norm_output, mask
 
 
 class SubDecoder(nn.Module):
     def __init__(self, h, dim_model, dim_ff):
         super(SubDecoder, self).__init__()
         # 因为一个子decoder要用到2次MultiHeadAttention, 所以要实例化2次
-        self.multi_head_attention = [MultiHeadAttention(h, dim_model) for _ in range(2)]
+        self.multi_head_attention = nn.ModuleList([copy.deepcopy(MultiHeadAttention(h, dim_model)) for _ in range(2)])
         # Normalize over last dimension of size dim_model
-        self.layer_norm = [nn.LayerNorm(dim_model) for _ in range(3)]
+        self.layer_norm = nn.ModuleList([copy.deepcopy(nn.LayerNorm(dim_model)) for _ in range(3)])
         self.ffn = PositionWiseFeedForward(dim_model, dim_ff)
 
     def forward(self, x, encoder_output, mask):
@@ -209,17 +187,19 @@ class Encoder(nn.Module):
     def __init__(self, h, dim_model, dim_ff, num_sub_encoder):
         super(Encoder, self).__init__()
         # 论文第3页中，编码器中有6个子层
-        self.encoder = nn.Sequential(*[SubEncoder(h, dim_model, dim_ff) for _ in range(num_sub_encoder)])
+        self.encoder = nn.ModuleList([copy.deepcopy(SubEncoder(h, dim_model, dim_ff)) for _ in range(num_sub_encoder)])
 
-    def forward(self, x):
-        return self.encoder(x)
+    def forward(self, x, mask):
+        for sub_encoder in self.encoder:
+            x, mask = sub_encoder(x, mask=mask)
+        return x
 
 
 class Decoder(nn.Module):
     def __init__(self, h, dim_model, dim_ff, num_sub_decoder):
         super(Decoder, self).__init__()
         # 论文第3页中，解码器中有6个子层
-        self.decoder = nn.ModuleList([SubDecoder(h, dim_model, dim_ff) for _ in range(num_sub_decoder)])
+        self.decoder = nn.ModuleList([copy.deepcopy(SubDecoder(h, dim_model, dim_ff)) for _ in range(num_sub_decoder)])
 
     def forward(self, x, encoder_output, mask):
         for sub_decoder in self.decoder:
@@ -228,9 +208,9 @@ class Decoder(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, dim_model, max_seq_len=50000):
+    def __init__(self, dim_model, max_seq_len=5000):
         # 长度过长的句子，已经在数据集上去除了。
-        # 这里max_seq_len=50000是为了生成一个参考位置编码，这样以后就只需要从这个位置编码中截取所需即可。
+        # 这里max_seq_len=5000是为了生成一个参考位置编码，这样以后就只需要从这个位置编码中截取所需即可。
         super(PositionalEncoding, self).__init__()
         self.dim_model = dim_model
         self.max_seq_len = max_seq_len
@@ -240,7 +220,8 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = np.sin(pe[:, 0::2])
         pe[:, 1::2] = np.cos(pe[:, 1::2])
         # 这里的pe为单独一个样本的位置编码，因此后续需要根据输入的batch将其调整为batch
-        self.position_encoding = pe
+        self.pe = pe
+        # self.position_encoding = pe
 
     def forward(self, x, x_len):
         """
@@ -251,13 +232,13 @@ class PositionalEncoding(nn.Module):
         """
         # 计算出当前batch下最长的序列长度。
         max_seq_len = max(x_len)
-        self.position_encoding = self.position_encoding[:max_seq_len]
+        position_encoding = torch.tensor(self.pe[:max_seq_len], dtype=torch.float32).cuda()
         batch_size = x_len.size(0)
-        self.position_encoding = self.position_encoding.expand([batch_size, max_seq_len, self.dim_model])
+        position_encoding = position_encoding.expand([batch_size, max_seq_len, self.dim_model])
         for row_idx, seq_len in enumerate(x_len):
             # 将序列中补零位置的位置编码设置成0
-            self.position_encoding[row_idx, seq_len:] = 0
-        return x + self.position_encoding
+            position_encoding[row_idx, int(seq_len):] = 0
+        return x + position_encoding
 
 
 class Embedding(nn.Module):
@@ -265,13 +246,25 @@ class Embedding(nn.Module):
         super(Embedding, self).__init__()
         self.embedding = nn.Embedding(vocab_size, dim_model)
 
-    def forward(self, x):
+    def forward(self, x, maskable=True):
         """
         将batch_size数据转换成 dim_ model
         :param x: batch_size input, [[idx11, idx12, ...], [idx21, idx22, ...], ...]
         :return:
         """
-        return self.embedding(x)
+        embedding = self.embedding(x)
+        if maskable:
+            # 这里的embedding包含了padding=0的lookup后的embedding向量，因此要将这些embedding向量的值人为全部置为0。这里x!=0，即：x不等于padding的值。之后将x!=0得到的张量在最后一维进行unsqueeze, 从而将2阶张量变为3阶张量。
+            mask_matrix = (x != 0).unsqueeze(dim=-1).type_as(x)
+            return embedding.masked_fill(mask_matrix==0, 0)
+            # 如果不用masked_fill, 则用以下方式也可达到相同目的。
+            # 这里再将mask_matrix expand到与embedding同形的张量。
+            # mask_matrix = mask_matrix.expand(list(embedding))
+            # # 最后再将mask_matrix与embedding进行对应点相乘，从而达到mask padding embedding值。
+            # return torch.mul(embedding, mask_matrix)
+
+        else:
+            return embedding
 
 
 class EncoderDecoder(nn.Module):
@@ -282,17 +275,23 @@ class EncoderDecoder(nn.Module):
         self.positional_encoding = PositionalEncoding(dim_model)
         self.src_embedding = Embedding(src_vocab_size, dim_model)
         self.tgt_embedding = Embedding(tgt_vocab_size, dim_model)
+        # 自定义可训练的bias
+        # self.softmax_biases = torch.randn(size=[tgt_vocab_size], requires_grad=True)
+        # nn.Parameter是自动在Module注册变量的，其它变量需要注册时使用self.register_buffer()
+        self.softmax_biases = nn.Parameter(data=torch.randn(size=[tgt_vocab_size]))
+        # self.register_buffer('softmax_biases', self.softmax_biases)
 
     def forward(self, src, src_size, tgt, tgt_size):
         # 这里的src, 认为已经通过了padding
         # Todo: 暂时不考虑mask
         x = self.src_embedding(src)
-        x = self.positional_encoding(x)
-        encoder_output = self.encoder(x)
+        x = self.positional_encoding(x, src_size)
+        encoder_output = self.encoder(x, mask=src)
         y = self.tgt_embedding(tgt)
-        y = self.positional_encoding(y)
-        y = self.decoder(y, encoder_output, mask=None)
-        output = torch.bmm(y, torch.transpose(self.tgt_embedding.weight))
+        y = self.positional_encoding(y, tgt_size)
+        y = self.decoder(y, encoder_output, mask=tgt)
+        # 这里第二个参数自带转置
+        output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
         return output
 
     # def backward(self, src, src_size, tgt, tgt_size):
@@ -302,19 +301,6 @@ class EncoderDecoder(nn.Module):
 #     model = EncoderDecoder(vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder)
 
 # model = EncoderDecoder(src_vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder)
-
-
-model = EncoderDecoder(
-    src_vocab_size=10000,
-    tgt_vocab_size=20000,
-    h=8,
-    dim_model=512,
-    dim_ff=2048,
-    num_sub_decoder=6,
-    num_sub_encoder=6
-)
-
-print(model)
 
 
 
