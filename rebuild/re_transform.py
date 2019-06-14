@@ -9,6 +9,21 @@ import seaborn
 seaborn.set_context(context='talk')
 
 
+def sequence_mask(raw_input):
+    """
+    :param raw_input: batch_size input before embedding.
+    :return:
+    """
+    batch_size, max_sequence = list(raw_input.shape)
+    mask_vertical = raw_input.unsqueeze(dim=-1).expand(batch_size, max_sequence, max_sequence)
+    mask_vertical = (mask_vertical!=0)
+    mask_vertical = mask_vertical.masked_fill(mask_vertical==0, 0)
+    mask_horizontal = raw_input.unsqueeze(dim=-2).expand(batch_size, max_sequence, max_sequence)
+    mask_horizontal = (mask_horizontal!=0).type_as(torch.tensor(np.inf))
+    mask_horizontal = mask_horizontal.masked_fill(mask_horizontal==0, 0)
+    return (mask_horizontal.cuda(), mask_vertical.cuda())
+
+
 def attention(query, key, value, mask=None, dropout=None):
     """
     参考论文<Attention is All You Need>3.2.1,
@@ -30,15 +45,11 @@ def attention(query, key, value, mask=None, dropout=None):
     # 与其它词的key向量进行点积计算相似度。
     scores = torch.bmm(query, key.transpose(dim0=1, dim1=2)) / math.sqrt(d_k)
     if mask is not None:
-        # 可将mask设置为原始batch_size的输入值
-        mask = mask.unsqueeze(dim=-1)
-        scores = scores.masked_fill(mask==0, value=-np.inf)
-        scores.masked_fill_(scores.transpose(dim0=-2, dim1=-1)==-np.inf, -np.inf)
-    # 因此softmax要沿着torch.bmm之后结果的最后一维进行，即沿矩阵A的列进行softmax, 即对矩阵A的每一行进行softmax
-    # 总的来看就是可以得到每个样本中，每句话的每一个词的query与同句话中其它词key的相似度概率分布。
+        # scores = torch.mul(scores, mask[0].type_as(scores))
+        scores.masked_fill_(mask[0]==0, -np.inf)
     scores = F.softmax(scores, dim=-1)
     if mask is not None:
-        scores.masked_fill_(mask==0, 0)
+        scores = torch.mul(scores, mask[1].type_as(scores))
     # output的维度为[batch_size, num_word, value最后一维的维度]
     # 同样取一个样本的后两维构成的矩阵B进行分析：第i行为第i个词要计算的value加权和。
     output = torch.bmm(scores, value)
@@ -286,10 +297,12 @@ class EncoderDecoder(nn.Module):
         # Todo: 暂时不考虑mask
         x = self.src_embedding(src)
         x = self.positional_encoding(x, src_size)
-        encoder_output = self.encoder(x, mask=src)
+        mask = sequence_mask(src)
+        encoder_output = self.encoder(x, mask=mask)
         y = self.tgt_embedding(tgt)
         y = self.positional_encoding(y, tgt_size)
-        y = self.decoder(y, encoder_output, mask=tgt)
+        mask = sequence_mask(tgt)
+        y = self.decoder(y, encoder_output, mask=mask)
         # 这里第二个参数自带转置
         output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
         return output

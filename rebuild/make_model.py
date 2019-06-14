@@ -53,7 +53,7 @@ criterion = criterion.cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, betas=[0.9, 0.98], eps=1e-9)
 
 
-# lr_lambda = lambda steps: (1/d_model)**0.5 * min((1/steps)**0.5, steps*(1/4000)**1.5)
+# lr_lambda = lambda steps: (1/d_model)**0.5 * min((1/(steps+1))**0.5, steps*(1/4000)**1.5)
 # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
