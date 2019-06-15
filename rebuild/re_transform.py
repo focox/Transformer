@@ -11,6 +11,7 @@ seaborn.set_context(context='talk')
 
 def sequence_mask(raw_input):
     """
+    raw_input为embedding前的batch_size，形如[[3,2,1,0,0],[6,7,8,5,1]]。其中的1为eos, 0为padding的值，因些可以根据raw_input计算出mask的张量。
     :param raw_input: batch_size input before embedding.
     :return:
     """
@@ -21,6 +22,8 @@ def sequence_mask(raw_input):
     mask_horizontal = raw_input.unsqueeze(dim=-2).expand(batch_size, max_sequence, max_sequence)
     mask_horizontal = (mask_horizontal!=0).type_as(torch.tensor(np.inf))
     mask_horizontal = mask_horizontal.masked_fill(mask_horizontal==0, 0)
+    # return (mask_horizontal, mask_vertical)
+    # 将数据放到GPU中
     return (mask_horizontal.cuda(), mask_vertical.cuda())
 
 
@@ -28,11 +31,10 @@ def attention(query, key, value, mask=None, dropout=None):
     """
     参考论文<Attention is All You Need>3.2.1,
     :param torch.tensor, query: shape=[batch_size, num_word, word_vec], 若从batch中选择一个样本，则这个样本的形状：
-    [word_vec1; word_vec2; ...], 其中每一个word_vec占用一行，列的维度固定为word_vec的维度。因此：第一维是batch的size数，
-    第二维是句子中词的个数，第三维是词向量的维度。
+    [word_vec1; word_vec2; ...], 其中每一个word_vec占用一行，列的维度固定为word_vec的维度。因此：第一维是batch的size数，第二维是句子中词的个数，第三维是词向量的维度。
     :param key: shape=[batch_size, num_word, word_vec]
     :param value: shape=[batch_size, num_word, word_vec]
-    :param mask: 这里的mask可根据embedding前的batch_size input得到，不为0的地方置为1,为0的置为-inf
+    :param mask: mask可根据embedding前的batch_size input得到，不为0的地方置为1,为0的置为-inf。这里的mask为一个tuple, 第一个用于softmax之前，将padding位置的权重置为-inf；第二个用于softmax之后，将padding位置与非padding位置的点积值置为0。这里为什么要设置两个mask？因为如果在softmax之前，将所有与padding位置相关的权值全部置为-inf, 那么padding位置的权值向量将全为-inf, 即[-inf, -inf, -inf, ...], 这个向量再经过softmax后，将全部变成nan, nan与任何值的运算将仍然为nan. 这将不便于后续计算。
     :return:
     """
     # 获取query中最后一个维度，即词向量的维度，来源于论文第3页倒数第三段最后一行。
@@ -134,8 +136,9 @@ class SubEncoder(nn.Module):
         # 这里要实例化两个LayerNorm，不然应该会出现参数共享的情况。
         self.layer_norm = nn.ModuleList([copy.deepcopy(nn.LayerNorm(dim_model)) for _ in range(2)])
         self.ffn = PositionWiseFeedForward(dim_model, dim_ff)
+        self.dropout = nn.Dropout(0.1)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, dropout=False):
         """
         sub-encoder, the complete encoder block.
         :param x: batch输入数据
@@ -144,6 +147,8 @@ class SubEncoder(nn.Module):
         # *********sub-layer1************
         multi_head_attention_output = self.multi_head_attention(x, x, x, mask=mask)
         # residual connection
+        if dropout:
+            multi_head_attention_output = self.dropout(multi_head_attention_output)
         residual_layer = multi_head_attention_output + x
         layer_norm_output = self.layer_norm[0](residual_layer)
         # *********sub-layer2************
@@ -162,8 +167,9 @@ class SubDecoder(nn.Module):
         # Normalize over last dimension of size dim_model
         self.layer_norm = nn.ModuleList([copy.deepcopy(nn.LayerNorm(dim_model)) for _ in range(3)])
         self.ffn = PositionWiseFeedForward(dim_model, dim_ff)
+        self.dropout = nn.Dropout(0.1)
 
-    def forward(self, x, encoder_output, mask):
+    def forward(self, x, encoder_output, mask, dropout=False):
         """
         sub-decoder, the complete decoder block.
         :param x: batch输入数据
@@ -174,6 +180,8 @@ class SubDecoder(nn.Module):
         # Multi-Head Attention
         multi_head_attention_output = self.multi_head_attention[0](x, x, x, mask)
         # Add, residual connection 1
+        if dropout:
+            multi_head_attention_output = self.dropout(multi_head_attention_output)
         residual_layer = multi_head_attention_output + x
         # Norm 1
         layer_norm_output = self.layer_norm[0](residual_layer)
@@ -200,9 +208,9 @@ class Encoder(nn.Module):
         # 论文第3页中，编码器中有6个子层
         self.encoder = nn.ModuleList([copy.deepcopy(SubEncoder(h, dim_model, dim_ff)) for _ in range(num_sub_encoder)])
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, dropout=False):
         for sub_encoder in self.encoder:
-            x, mask = sub_encoder(x, mask=mask)
+            x, mask = sub_encoder(x, mask=mask, dropout=dropout)
         return x
 
 
@@ -212,9 +220,9 @@ class Decoder(nn.Module):
         # 论文第3页中，解码器中有6个子层
         self.decoder = nn.ModuleList([copy.deepcopy(SubDecoder(h, dim_model, dim_ff)) for _ in range(num_sub_decoder)])
 
-    def forward(self, x, encoder_output, mask):
+    def forward(self, x, encoder_output, mask, dropout=False):
         for sub_decoder in self.decoder:
-            x = sub_decoder(x, encoder_output, mask)
+            x = sub_decoder(x, encoder_output, mask, dropout=dropout)
         return x
 
 
@@ -232,9 +240,10 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = np.cos(pe[:, 1::2])
         # 这里的pe为单独一个样本的位置编码，因此后续需要根据输入的batch将其调整为batch
         self.pe = pe
+        self.dropout = nn.Dropout(0.1)
         # self.position_encoding = pe
 
-    def forward(self, x, x_len):
+    def forward(self, x, x_len, dropout=False):
         """
         compute positional encoding. x_len 为 batch_size 数据，形状为：[batch_size, 1], 行为样本，列为样本长度。
         :param x: batch_size data
@@ -249,21 +258,28 @@ class PositionalEncoding(nn.Module):
         for row_idx, seq_len in enumerate(x_len):
             # 将序列中补零位置的位置编码设置成0
             position_encoding[row_idx, int(seq_len):] = 0
-        return x + position_encoding
-
+        if not dropout:
+            return x + position_encoding
+        else:
+            return x + self.dropout(position_encoding)
 
 class Embedding(nn.Module):
     def __init__(self, vocab_size, dim_model):
         super(Embedding, self).__init__()
         self.embedding = nn.Embedding(vocab_size, dim_model)
+        self.dropout = nn.Dropout(0.1)
 
-    def forward(self, x, maskable=True):
+    def forward(self, x, dropout=False, maskable=True):
         """
         将batch_size数据转换成 dim_ model
         :param x: batch_size input, [[idx11, idx12, ...], [idx21, idx22, ...], ...]
+        :param dropout: 是否dropout
+        :param maskable: 是否将padding通过embedding后的词向量全部置0
         :return:
         """
         embedding = self.embedding(x)
+        if dropout:
+            embedding = self.dropout(embedding)
         if maskable:
             # 这里的embedding包含了padding=0的lookup后的embedding向量，因此要将这些embedding向量的值人为全部置为0。这里x!=0，即：x不等于padding的值。之后将x!=0得到的张量在最后一维进行unsqueeze, 从而将2阶张量变为3阶张量。
             mask_matrix = (x != 0).unsqueeze(dim=-1).type_as(x)
@@ -295,14 +311,14 @@ class EncoderDecoder(nn.Module):
     def forward(self, src, src_size, tgt, tgt_size):
         # 这里的src, 认为已经通过了padding
         # Todo: 暂时不考虑mask
-        x = self.src_embedding(src)
-        x = self.positional_encoding(x, src_size)
+        x = self.src_embedding(src, dropout=True)
+        x = self.positional_encoding(x, src_size, dropout=True)
         mask = sequence_mask(src)
-        encoder_output = self.encoder(x, mask=mask)
-        y = self.tgt_embedding(tgt)
-        y = self.positional_encoding(y, tgt_size)
+        encoder_output = self.encoder(x, mask=mask, dropout=True)
+        y = self.tgt_embedding(tgt, dropout=True)
+        y = self.positional_encoding(y, tgt_size, dropout=True)
         mask = sequence_mask(tgt)
-        y = self.decoder(y, encoder_output, mask=mask)
+        y = self.decoder(y, encoder_output, mask=mask, dropout=True)
         # 这里第二个参数自带转置
         output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
         return output

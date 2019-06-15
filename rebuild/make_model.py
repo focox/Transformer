@@ -1,12 +1,8 @@
-from re_transform import *
-import torch
-import torchtext
-from torchtext.data import Field, Example, TabularDataset, BucketIterator
-import pandas as pd
-import math
+from rebuild.re_transform import *
+from torchtext.data import Field, TabularDataset, BucketIterator
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 train_data = '../data/train.csv'
@@ -50,7 +46,7 @@ model = model.cuda()
 
 criterion = nn.CrossEntropyLoss(ignore_index=0)
 criterion = criterion.cuda()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01, betas=[0.9, 0.98], eps=1e-9)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005, betas=[0.9, 0.98], eps=1e-9)
 
 
 # lr_lambda = lambda steps: (1/d_model)**0.5 * min((1/(steps+1))**0.5, steps*(1/4000)**1.5)
@@ -79,7 +75,7 @@ for epoch in range(EPOCHS):
         optimizer.step()
 
         steps += 1
-        if steps % 100 == 0:
+        if steps % 1000 == 0:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
