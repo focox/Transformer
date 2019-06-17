@@ -7,24 +7,29 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn
 seaborn.set_context(context='talk')
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def sequence_mask(raw_input):
     """
     raw_input为embedding前的batch_size，形如[[3,2,1,0,0],[6,7,8,5,1]]。其中的1为eos, 0为padding的值，因些可以根据raw_input计算出mask的张量。
+    不能仅仅只根据0来判断padding的位置，因为在解码器的输入序列中，开头是以sos=0开始的。
     :param raw_input: batch_size input before embedding.
     :return:
     """
     batch_size, max_sequence = list(raw_input.shape)
-    mask_vertical = raw_input.unsqueeze(dim=-1).expand(batch_size, max_sequence, max_sequence)
+    # 这里将raw_input中每个样本的第一个index替换成1，以防当句子开头是sos=0时被误mask
+    remolded_input = copy.deepcopy(raw_input)
+    remolded_input[:, 0] = 1
+    mask_vertical = remolded_input.unsqueeze(dim=-1).expand(batch_size, max_sequence, max_sequence)
     mask_vertical = (mask_vertical!=0)
     mask_vertical = mask_vertical.masked_fill(mask_vertical==0, 0)
-    mask_horizontal = raw_input.unsqueeze(dim=-2).expand(batch_size, max_sequence, max_sequence)
+    mask_horizontal = remolded_input.unsqueeze(dim=-2).expand(batch_size, max_sequence, max_sequence)
     mask_horizontal = (mask_horizontal!=0).type_as(torch.tensor(np.inf))
     mask_horizontal = mask_horizontal.masked_fill(mask_horizontal==0, 0)
     # return (mask_horizontal, mask_vertical)
     # 将数据放到GPU中
-    return (mask_horizontal.cuda(), mask_vertical.cuda())
+    return (mask_horizontal.to(device), mask_vertical.to(device))
 
 
 def attention(query, key, value, mask=None, dropout=None):
@@ -169,6 +174,7 @@ class SubDecoder(nn.Module):
         self.ffn = PositionWiseFeedForward(dim_model, dim_ff)
         self.dropout = nn.Dropout(0.1)
 
+    # Todo: 这里还是有问题，因为没有处理现在会利用将来信息的问题。
     def forward(self, x, encoder_output, mask, dropout=False):
         """
         sub-decoder, the complete decoder block.
@@ -185,6 +191,7 @@ class SubDecoder(nn.Module):
         residual_layer = multi_head_attention_output + x
         # Norm 1
         layer_norm_output = self.layer_norm[0](residual_layer)
+        # Todo: 还需要再加入mask层
         # *********sub-layer2************
         # encoder-decoder attention
         encoder_decoder_attention_output = self.multi_head_attention[1](layer_norm_output, encoder_output, encoder_output)
@@ -252,7 +259,8 @@ class PositionalEncoding(nn.Module):
         """
         # 计算出当前batch下最长的序列长度。
         max_seq_len = max(x_len)
-        position_encoding = torch.tensor(self.pe[:max_seq_len], dtype=torch.float32).cuda()
+        # position_encoding = torch.tensor(self.pe[:max_seq_len], dtype=torch.float32)
+        position_encoding = torch.tensor(self.pe[:max_seq_len], dtype=torch.float32).to(device)
         batch_size = x_len.size(0)
         position_encoding = position_encoding.expand([batch_size, max_seq_len, self.dim_model])
         for row_idx, seq_len in enumerate(x_len):
@@ -274,15 +282,18 @@ class Embedding(nn.Module):
         将batch_size数据转换成 dim_ model
         :param x: batch_size input, [[idx11, idx12, ...], [idx21, idx22, ...], ...]
         :param dropout: 是否dropout
-        :param maskable: 是否将padding通过embedding后的词向量全部置0
+        :param maskable: 是否将padding通过embedding后的词向量全部置0，这里也不能仅仅只根据是不是0来判断padding的位置
         :return:
         """
         embedding = self.embedding(x)
         if dropout:
             embedding = self.dropout(embedding)
         if maskable:
+            # 这里将x中每个样本的第一个index替换成1，以防当句子开头是sos=0时被误mask
+            remolded_x = copy.deepcopy(x)
+            remolded_x[:, 0] = 1
             # 这里的embedding包含了padding=0的lookup后的embedding向量，因此要将这些embedding向量的值人为全部置为0。这里x!=0，即：x不等于padding的值。之后将x!=0得到的张量在最后一维进行unsqueeze, 从而将2阶张量变为3阶张量。
-            mask_matrix = (x != 0).unsqueeze(dim=-1).type_as(x)
+            mask_matrix = (remolded_x != 0).unsqueeze(dim=-1).type_as(x)
             return embedding.masked_fill(mask_matrix==0, 0)
             # 如果不用masked_fill, 则用以下方式也可达到相同目的。
             # 这里再将mask_matrix expand到与embedding同形的张量。
@@ -317,13 +328,30 @@ class EncoderDecoder(nn.Module):
         encoder_output = self.encoder(x, mask=mask, dropout=True)
         y = self.tgt_embedding(tgt, dropout=True)
         y = self.positional_encoding(y, tgt_size, dropout=True)
+        # Todo: 这里的mask应该要与encoder层不一样，因为decoder要处理现在会利用将来信息的情况。
         mask = sequence_mask(tgt)
         y = self.decoder(y, encoder_output, mask=mask, dropout=True)
         # 这里第二个参数自带转置
         output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
         return output
 
-    # def backward(self, src, src_size, tgt, tgt_size):
+    def predict(self, src, src_size):
+        x = self.src_embedding(src)
+        x = self.positional_encoding(x, src_size)
+        mask = sequence_mask(src)
+        encoder_output = self.encoder(x, mask=mask)
+        tgt = torch.tensor([[0]]).type_as(src)
+        tgt_size = torch.tensor([1]).type_as(src_size)
+        target = [0]
+        while target[-1] != 1:
+            y = self.tgt_embedding(tgt)
+            y = self.positional_encoding(y, tgt_size)
+            # mask = sequence_mask(tgt)
+            y = self.decoder(y, encoder_output, mask=None)
+            output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
+            target = [0] + output.squeeze().tolist()
+            tgt = torch.tensor(target).unsqueeze(dim=0).type_as(src)
+        return target
 
 
 # def make_model(vocab_size, h, dim_model, dim_ff, num_sub_encoder, num_sub_decoder):
