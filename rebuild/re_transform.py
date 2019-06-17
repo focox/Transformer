@@ -10,11 +10,12 @@ seaborn.set_context(context='talk')
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def sequence_mask(raw_input):
+def sequence_mask(raw_input, bidirectional=True):
     """
     raw_input为embedding前的batch_size，形如[[3,2,1,0,0],[6,7,8,5,1]]。其中的1为eos, 0为padding的值，因些可以根据raw_input计算出mask的张量。
     不能仅仅只根据0来判断padding的位置，因为在解码器的输入序列中，开头是以sos=0开始的。
     :param raw_input: batch_size input before embedding.
+    :param bidirectional: bool, 当为True时，现在时刻可以利用未来时刻信息，否则不可以利用。
     :return:
     """
     batch_size, max_sequence = list(raw_input.shape)
@@ -22,13 +23,16 @@ def sequence_mask(raw_input):
     remolded_input = copy.deepcopy(raw_input)
     remolded_input[:, 0] = 1
     mask_vertical = remolded_input.unsqueeze(dim=-1).expand(batch_size, max_sequence, max_sequence)
-    mask_vertical = (mask_vertical!=0)
-    mask_vertical = mask_vertical.masked_fill(mask_vertical==0, 0)
+    mask_vertical = (mask_vertical != 0)
+    # 此处仅做替零处理
+    mask_vertical = mask_vertical.masked_fill(mask_vertical == 0, 0)
     mask_horizontal = remolded_input.unsqueeze(dim=-2).expand(batch_size, max_sequence, max_sequence)
-    mask_horizontal = (mask_horizontal!=0).type_as(torch.tensor(np.inf))
-    mask_horizontal = mask_horizontal.masked_fill(mask_horizontal==0, 0)
-    # return (mask_horizontal, mask_vertical)
-    # 将数据放到GPU中
+    mask_horizontal = (mask_horizontal != 0).type_as(torch.tensor(np.inf))
+    # 此处仅做替零处理，具体替为-inf在attention中进行。
+    mask_horizontal = mask_horizontal.masked_fill(mask_horizontal == 0, 0)
+    if not bidirectional:
+        mask_unidirectional = torch.tensor([[1]*i + [0]*(max_sequence-i) for i in range(1, max_sequence+1)])
+        mask_horizontal.masked_fill_(mask_unidirectional == 0, 0)
     return (mask_horizontal.to(device), mask_vertical.to(device))
 
 
@@ -53,7 +57,7 @@ def attention(query, key, value, mask=None, dropout=None):
     scores = torch.bmm(query, key.transpose(dim0=1, dim1=2)) / math.sqrt(d_k)
     if mask is not None:
         # scores = torch.mul(scores, mask[0].type_as(scores))
-        scores.masked_fill_(mask[0]==0, -np.inf)
+        scores.masked_fill_(mask[0] == 0, -np.inf)
     scores = F.softmax(scores, dim=-1)
     if mask is not None:
         scores = torch.mul(scores, mask[1].type_as(scores))
@@ -191,9 +195,8 @@ class SubDecoder(nn.Module):
         residual_layer = multi_head_attention_output + x
         # Norm 1
         layer_norm_output = self.layer_norm[0](residual_layer)
-        # Todo: 还需要再加入mask层
         # *********sub-layer2************
-        # encoder-decoder attention
+        # encoder-decoder attention, 该层不需要mask
         encoder_decoder_attention_output = self.multi_head_attention[1](layer_norm_output, encoder_output, encoder_output)
         # Add, residual connection 2
         residual_layer = encoder_decoder_attention_output + layer_norm_output
@@ -329,7 +332,7 @@ class EncoderDecoder(nn.Module):
         y = self.tgt_embedding(tgt, dropout=True)
         y = self.positional_encoding(y, tgt_size, dropout=True)
         # Todo: 这里的mask应该要与encoder层不一样，因为decoder要处理现在会利用将来信息的情况。
-        mask = sequence_mask(tgt)
+        mask = sequence_mask(tgt, bidirectional=False)
         y = self.decoder(y, encoder_output, mask=mask, dropout=True)
         # 这里第二个参数自带转置
         output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
@@ -338,7 +341,7 @@ class EncoderDecoder(nn.Module):
     def predict(self, src, src_size):
         x = self.src_embedding(src)
         x = self.positional_encoding(x, src_size)
-        mask = sequence_mask(src)
+        mask = sequence_mask(src, bidirectional=False)
         encoder_output = self.encoder(x, mask=mask)
         tgt = torch.tensor([[0]]).type_as(src)
         tgt_size = torch.tensor([1]).type_as(src_size)
