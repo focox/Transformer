@@ -1,9 +1,9 @@
-from rebuild.re_transform import *
+from re_transform import *
 from torchtext.data import Field, TabularDataset, BucketIterator
 import torch
 import torch.nn as nn
 
-# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 train_data = '../data/train.csv'
 test_data = '../data/test.csv'
@@ -24,8 +24,8 @@ train_iterator = BucketIterator(dataset=train_set, batch_size=100, repeat=True, 
 
 
 model = EncoderDecoder(
-    src_vocab_size=10003,
-    tgt_vocab_size=20003,
+    src_vocab_size=10000,
+    tgt_vocab_size=4950,
     h=8,
     dim_model=512,
     dim_ff=2048,
@@ -35,10 +35,10 @@ model = EncoderDecoder(
 
 print(model)
 
-EPOCHS = 5
+EPOCHS = 2
 d_model = 512
 warmup_steps = 4000
-tgt_vocab_size = 20003
+tgt_vocab_size = 4950
 steps = 1
 PATH = '../model/checkpoint'
 
@@ -60,13 +60,13 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.005, betas=[0.9, 0.98], ep
 for epoch in range(EPOCHS):
     for i in train_iterator:
         # print(i)
-        output = model(i.English[0].cuda(), i.English[1].cuda(), i.Chinese_input[0].cuda(), i.Chinese_input[1].cuda())
-        output = output.view(-1, tgt_vocab_size).cuda()
+        output = model(i.English[0].to(device), i.English[1].to(device), i.Chinese_input[0].to(device), i.Chinese_input[1].to(device))
+        output = output.view(-1, tgt_vocab_size).to(device)
         # print(output.shape)
-        label = i.Chinese_output[0].view(-1, 1).squeeze(dim=-1).cuda()
+        label = i.Chinese_output[0].view(-1, 1).squeeze(dim=-1).to(device)
         # label_len = i.Chinese_output[1]
 
-        loss = criterion(input=output, target=label).cuda()
+        loss = criterion(input=output, target=label).to(device)
         print(steps, '==>>', loss)
 
         optimizer.zero_grad()

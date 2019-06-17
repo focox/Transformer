@@ -218,7 +218,7 @@ class Encoder(nn.Module):
         # 论文第3页中，编码器中有6个子层
         self.encoder = nn.ModuleList([copy.deepcopy(SubEncoder(h, dim_model, dim_ff)) for _ in range(num_sub_encoder)])
 
-    def forward(self, x, mask, dropout=False):
+    def forward(self, x, mask=None, dropout=False):
         for sub_encoder in self.encoder:
             x, mask = sub_encoder(x, mask=mask, dropout=dropout)
         return x
@@ -273,6 +273,7 @@ class PositionalEncoding(nn.Module):
             return x + position_encoding
         else:
             return x + self.dropout(position_encoding)
+
 
 class Embedding(nn.Module):
     def __init__(self, vocab_size, dim_model):
@@ -341,19 +342,28 @@ class EncoderDecoder(nn.Module):
     def predict(self, src, src_size):
         x = self.src_embedding(src)
         x = self.positional_encoding(x, src_size)
-        mask = sequence_mask(src, bidirectional=False)
-        encoder_output = self.encoder(x, mask=mask)
+        # 单个样本进行预测不需要mask
+        # mask = sequence_mask(src, bidirectional=False)
+        encoder_output = self.encoder(x)
         tgt = torch.tensor([[0]]).type_as(src)
         tgt_size = torch.tensor([1]).type_as(src_size)
         target = [0]
-        while target[-1] != 1:
+        max_len = 0
+        while (target[-1] != 1) and (max_len <= 50):
             y = self.tgt_embedding(tgt)
             y = self.positional_encoding(y, tgt_size)
             # mask = sequence_mask(tgt)
+            #
             y = self.decoder(y, encoder_output, mask=None)
             output = F.linear(y, self.tgt_embedding.embedding.weight, bias=self.softmax_biases)
-            target = [0] + output.squeeze().tolist()
+            output.squeeze_(dim=0)
+            output = output.argmax(dim=-1)
+            target = [0] + output.tolist()
             tgt = torch.tensor(target).unsqueeze(dim=0).type_as(src)
+            tgt_size = torch.tensor(len(target)).unsqueeze(dim=0).type_as(tgt_size)
+            # print('tgt:', tgt, '\ntgt_size:', tgt_size)
+            max_len += 1
+            # print('max_len', max_len)
         return target
 
 
